@@ -1,0 +1,6 @@
+{
+  "name": "TrendRadar AI",
+  "description": "AI-powered social trend intelligence, content opportunity scoring, and multi-platform performance analytics for prediction markets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
