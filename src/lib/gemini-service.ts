@@ -1,14 +1,53 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
 function getAiClient() {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error(
+      'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your Vercel project Environment Variables.'
+    );
+  }
   return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
       },
     },
   });
+}
+
+async function generateWithModelFallback(
+  ai: GoogleGenAI,
+  params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>
+) {
+  const preferred = process.env.GEMINI_MODEL?.trim();
+  const candidateModels = preferred
+    ? [preferred, 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.0-flash']
+    : ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.0-flash'];
+  const uniqueModels = Array.from(new Set(candidateModels));
+
+  let lastError: any;
+  for (const model of uniqueModels) {
+    try {
+      return await ai.models.generateContent({
+        ...params,
+        model,
+      });
+    } catch (err: any) {
+      lastError = err;
+      const msg = String(err?.message || '');
+      if (
+        msg.includes('404') ||
+        msg.toLowerCase().includes('not found') ||
+        msg.toLowerCase().includes('not supported')
+      ) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 export interface TrendAnalysisResult {
@@ -56,8 +95,7 @@ CRITICAL INSTRUCTIONS:
 4. Recommend the best social platform from: "X", "YouTube", "TikTok", "Instagram", "LinkedIn".
 5. Assign priority from: "High", "Medium", "Low".`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
+  const response = await generateWithModelFallback(ai, {
     contents: prompt,
     config: {
       systemInstruction:
@@ -208,8 +246,7 @@ Generate exactly 5 recommendations, one for each of these exact recommendationTy
 
 Every recommendation MUST cite specific numbers, scores, engagement rates, CTRs, or categories from the provided data in its dataExplanation.`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
+  const response = await generateWithModelFallback(ai, {
     contents: prompt,
     config: {
       systemInstruction:

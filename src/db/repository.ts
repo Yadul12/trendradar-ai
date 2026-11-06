@@ -1,5 +1,8 @@
 import { eq, desc, and } from 'drizzle-orm';
-import { db } from './index.ts';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { db, hasDatabaseConfig, ensureDatabaseSchema } from './index.ts';
 import {
   users,
   monitoredKeywords,
@@ -34,8 +37,137 @@ export function computeOpportunityScore(scores: {
   return Math.round(Math.max(0, Math.min(100, weighted)));
 }
 
-export async function getOrCreateUser(uid: string, email: string) {
+interface FallbackStore {
+  nextId: number;
+  users: Array<{ id: number; uid: string; email: string; createdAt: Date }>;
+  keywords: Array<any>;
+  trends: Array<any>;
+  socialMetrics: Array<any>;
+  recommendations: Array<any>;
+  calendarItems: Array<any>;
+}
+
+const FALLBACK_FILE = path.join(os.tmpdir(), 'trendradar-workspace-store.json');
+
+declare global {
+  var _fallbackStore: FallbackStore | undefined;
+}
+
+function getFallbackStore(): FallbackStore {
+  if (!global._fallbackStore) {
+    try {
+      if (fs.existsSync(FALLBACK_FILE)) {
+        const raw = fs.readFileSync(FALLBACK_FILE, 'utf8');
+        global._fallbackStore = JSON.parse(raw) as FallbackStore;
+      }
+    } catch {
+      // ignore read errors
+    }
+    if (!global._fallbackStore) {
+      global._fallbackStore = {
+        nextId: 1,
+        users: [],
+        keywords: [],
+        trends: [],
+        socialMetrics: [],
+        recommendations: [],
+        calendarItems: [],
+      };
+    }
+  }
+  return global._fallbackStore;
+}
+
+function saveFallbackStore(store: FallbackStore) {
   try {
+    fs.writeFileSync(FALLBACK_FILE, JSON.stringify(store), 'utf8');
+  } catch {
+    // ignore write errors in restricted environments
+  }
+}
+
+function seedFallbackUser(store: FallbackStore, userId: number, resetExisting = false) {
+  if (resetExisting) {
+    store.calendarItems = store.calendarItems.filter((x) => x.userId !== userId);
+    store.recommendations = store.recommendations.filter((x) => x.userId !== userId);
+    store.socialMetrics = store.socialMetrics.filter((x) => x.userId !== userId);
+    store.trends = store.trends.filter((x) => x.userId !== userId);
+    store.keywords = store.keywords.filter((x) => x.userId !== userId);
+  }
+
+  for (const k of INITIAL_KEYWORDS) {
+    store.keywords.push({
+      id: store.nextId++,
+      userId,
+      ...k,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const insertedTrends: Array<any> = [];
+  for (const t of INITIAL_TRENDS) {
+    const tr = {
+      id: store.nextId++,
+      userId,
+      ...t,
+      createdAt: new Date().toISOString(),
+    };
+    store.trends.push(tr);
+    insertedTrends.push(tr);
+  }
+
+  for (const m of INITIAL_SOCIAL_METRICS) {
+    store.socialMetrics.push({
+      id: store.nextId++,
+      userId,
+      ...m,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  for (const r of INITIAL_RECOMMENDATIONS) {
+    store.recommendations.push({
+      id: store.nextId++,
+      userId,
+      ...r,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  INITIAL_CALENDAR_ITEMS.forEach((c, idx) => {
+    store.calendarItems.push({
+      id: store.nextId++,
+      userId,
+      trendId: insertedTrends[idx % insertedTrends.length]?.id ?? null,
+      ...c,
+      createdAt: new Date().toISOString(),
+    });
+  });
+
+  saveFallbackStore(store);
+}
+
+export async function getOrCreateUser(uid: string, email: string) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    let user = store.users.find((u) => u.uid === uid);
+    if (!user) {
+      user = { id: store.nextId++, uid, email, createdAt: new Date() };
+      store.users.push(user);
+    } else {
+      user.email = email;
+    }
+    const hasTrends = store.trends.some((t) => t.userId === user.id);
+    if (!hasTrends) {
+      seedFallbackUser(store, user.id, false);
+    } else {
+      saveFallbackStore(store);
+    }
+    return user;
+  }
+
+  try {
+    await ensureDatabaseSchema();
     const result = await db
       .insert(users)
       .values({
@@ -52,7 +184,6 @@ export async function getOrCreateUser(uid: string, email: string) {
 
     const user = result[0];
 
-    // Check if user has any trends; if not, seed initial clearly-marked demo data
     const existingTrends = await db
       .select({ id: trends.id })
       .from(trends)
@@ -73,7 +204,14 @@ export async function getOrCreateUser(uid: string, email: string) {
 }
 
 export async function seedDemoDataForUser(userId: number, resetExisting = false) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    seedFallbackUser(store, userId, resetExisting);
+    return { seeded: true };
+  }
+
   try {
+    await ensureDatabaseSchema();
     if (resetExisting) {
       await db.delete(calendarItems).where(eq(calendarItems.userId, userId));
       await db.delete(aiRecommendations).where(eq(aiRecommendations.userId, userId));
@@ -129,7 +267,29 @@ export async function seedDemoDataForUser(userId: number, resetExisting = false)
 }
 
 export async function getFullWorkspaceData(userId: number) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    return {
+      keywords: store.keywords
+        .filter((x) => x.userId === userId)
+        .sort((a, b) => b.id - a.id),
+      trends: store.trends
+        .filter((x) => x.userId === userId)
+        .sort((a, b) => b.opportunityScore - a.opportunityScore || b.id - a.id),
+      socialMetrics: store.socialMetrics
+        .filter((x) => x.userId === userId)
+        .sort((a, b) => String(b.publishedDate).localeCompare(String(a.publishedDate))),
+      recommendations: store.recommendations
+        .filter((x) => x.userId === userId)
+        .sort((a, b) => b.id - a.id),
+      calendarItems: store.calendarItems
+        .filter((x) => x.userId === userId)
+        .sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate))),
+    };
+  }
+
   try {
+    await ensureDatabaseSchema();
     const [
       userKeywords,
       userTrends,
@@ -183,7 +343,24 @@ export async function createKeyword(
   userId: number,
   data: { keyword: string; category: string; priority: string }
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const created = {
+      id: store.nextId++,
+      userId,
+      keyword: data.keyword,
+      category: data.category,
+      priority: data.priority,
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+    store.keywords.push(created);
+    saveFallbackStore(store);
+    return created;
+  }
+
   try {
+    await ensureDatabaseSchema();
     const [created] = await db
       .insert(monitoredKeywords)
       .values({
@@ -202,7 +379,17 @@ export async function createKeyword(
 }
 
 export async function deleteKeyword(userId: number, keywordId: number) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    store.keywords = store.keywords.filter(
+      (k) => !(k.id === keywordId && k.userId === userId)
+    );
+    saveFallbackStore(store);
+    return { deleted: true };
+  }
+
   try {
+    await ensureDatabaseSchema();
     await db
       .delete(monitoredKeywords)
       .where(
@@ -245,15 +432,30 @@ export async function createTrendRecord(
     detectedAt: string;
   }
 ) {
-  try {
-    const opportunityScore = computeOpportunityScore({
-      scoreTrendRelevance: data.scoreTrendRelevance,
-      scoreRecency: data.scoreRecency,
-      scoreAudienceInterest: data.scoreAudienceInterest,
-      scoreEngagementPotential: data.scoreEngagementPotential,
-      scoreBrandRelevance: data.scoreBrandRelevance,
-    });
+  const opportunityScore = computeOpportunityScore({
+    scoreTrendRelevance: data.scoreTrendRelevance,
+    scoreRecency: data.scoreRecency,
+    scoreAudienceInterest: data.scoreAudienceInterest,
+    scoreEngagementPotential: data.scoreEngagementPotential,
+    scoreBrandRelevance: data.scoreBrandRelevance,
+  });
 
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const created = {
+      id: store.nextId++,
+      userId,
+      ...data,
+      opportunityScore,
+      createdAt: new Date().toISOString(),
+    };
+    store.trends.push(created);
+    saveFallbackStore(store);
+    return created;
+  }
+
+  try {
+    await ensureDatabaseSchema();
     const [created] = await db
       .insert(trends)
       .values({
@@ -291,7 +493,43 @@ export async function updateTrendRecord(
     supportingLinks: string;
   }>
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const idx = store.trends.findIndex(
+      (t) => t.id === trendId && t.userId === userId
+    );
+    if (idx === -1) {
+      throw new Error('Trend not found');
+    }
+    const existing = store.trends[idx];
+    const scoreTrendRelevance =
+      updates.scoreTrendRelevance ?? existing.scoreTrendRelevance;
+    const scoreRecency = updates.scoreRecency ?? existing.scoreRecency;
+    const scoreAudienceInterest =
+      updates.scoreAudienceInterest ?? existing.scoreAudienceInterest;
+    const scoreEngagementPotential =
+      updates.scoreEngagementPotential ?? existing.scoreEngagementPotential;
+    const scoreBrandRelevance =
+      updates.scoreBrandRelevance ?? existing.scoreBrandRelevance;
+    const opportunityScore = computeOpportunityScore({
+      scoreTrendRelevance,
+      scoreRecency,
+      scoreAudienceInterest,
+      scoreEngagementPotential,
+      scoreBrandRelevance,
+    });
+    const updated = {
+      ...existing,
+      ...updates,
+      opportunityScore,
+    };
+    store.trends[idx] = updated;
+    saveFallbackStore(store);
+    return updated;
+  }
+
   try {
+    await ensureDatabaseSchema();
     const existingList = await db
       .select()
       .from(trends)
@@ -338,7 +576,17 @@ export async function updateTrendRecord(
 }
 
 export async function deleteTrendRecord(userId: number, trendId: number) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    store.trends = store.trends.filter(
+      (t) => !(t.id === trendId && t.userId === userId)
+    );
+    saveFallbackStore(store);
+    return { deleted: true };
+  }
+
   try {
+    await ensureDatabaseSchema();
     await db
       .delete(trends)
       .where(and(eq(trends.id, trendId), eq(trends.userId, userId)));
@@ -368,7 +616,21 @@ export async function createSocialMetricRecord(
     dataOrigin: string;
   }
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const created = {
+      id: store.nextId++,
+      userId,
+      ...data,
+      createdAt: new Date().toISOString(),
+    };
+    store.socialMetrics.push(created);
+    saveFallbackStore(store);
+    return created;
+  }
+
   try {
+    await ensureDatabaseSchema();
     const [created] = await db
       .insert(socialMetrics)
       .values({
@@ -402,8 +664,26 @@ export async function bulkCreateSocialMetrics(
     dataOrigin: string;
   }>
 ) {
+  if (rows.length === 0) return [];
+
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const inserted = rows.map((r) => {
+      const item = {
+        id: store.nextId++,
+        userId,
+        ...r,
+        createdAt: new Date().toISOString(),
+      };
+      store.socialMetrics.push(item);
+      return item;
+    });
+    saveFallbackStore(store);
+    return inserted;
+  }
+
   try {
-    if (rows.length === 0) return [];
+    await ensureDatabaseSchema();
     const inserted = await db
       .insert(socialMetrics)
       .values(
@@ -423,7 +703,17 @@ export async function bulkCreateSocialMetrics(
 }
 
 export async function deleteSocialMetricRecord(userId: number, metricId: number) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    store.socialMetrics = store.socialMetrics.filter(
+      (m) => !(m.id === metricId && m.userId === userId)
+    );
+    saveFallbackStore(store);
+    return { deleted: true };
+  }
+
   try {
+    await ensureDatabaseSchema();
     await db
       .delete(socialMetrics)
       .where(
@@ -447,7 +737,27 @@ export async function replaceAiRecommendations(
     actionableStep: string;
   }>
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    store.recommendations = store.recommendations.filter(
+      (r) => r.userId !== userId
+    );
+    const inserted = items.map((item) => {
+      const rec = {
+        id: store.nextId++,
+        userId,
+        ...item,
+        createdAt: new Date().toISOString(),
+      };
+      store.recommendations.push(rec);
+      return rec;
+    });
+    saveFallbackStore(store);
+    return inserted;
+  }
+
   try {
+    await ensureDatabaseSchema();
     await db
       .delete(aiRecommendations)
       .where(eq(aiRecommendations.userId, userId));
@@ -483,7 +793,22 @@ export async function createCalendarItemRecord(
     checklistJson: string;
   }
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const created = {
+      id: store.nextId++,
+      userId,
+      ...data,
+      trendId: data.trendId ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    store.calendarItems.push(created);
+    saveFallbackStore(store);
+    return created;
+  }
+
   try {
+    await ensureDatabaseSchema();
     const [created] = await db
       .insert(calendarItems)
       .values({
@@ -517,7 +842,25 @@ export async function updateCalendarItemRecord(
     checklistJson: string;
   }>
 ) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    const idx = store.calendarItems.findIndex(
+      (c) => c.id === itemId && c.userId === userId
+    );
+    if (idx === -1) {
+      throw new Error('Calendar item not found');
+    }
+    const updated = {
+      ...store.calendarItems[idx],
+      ...updates,
+    };
+    store.calendarItems[idx] = updated;
+    saveFallbackStore(store);
+    return updated;
+  }
+
   try {
+    await ensureDatabaseSchema();
     const [updated] = await db
       .update(calendarItems)
       .set(updates)
@@ -533,7 +876,17 @@ export async function updateCalendarItemRecord(
 }
 
 export async function deleteCalendarItemRecord(userId: number, itemId: number) {
+  if (!hasDatabaseConfig()) {
+    const store = getFallbackStore();
+    store.calendarItems = store.calendarItems.filter(
+      (c) => !(c.id === itemId && c.userId === userId)
+    );
+    saveFallbackStore(store);
+    return { deleted: true };
+  }
+
   try {
+    await ensureDatabaseSchema();
     await db
       .delete(calendarItems)
       .where(
