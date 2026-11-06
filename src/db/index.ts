@@ -1,9 +1,12 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { Pool, type PoolConfig } from 'pg';
+import pg from 'pg';
+import type { Pool as PoolType, PoolConfig } from 'pg';
 import * as schema from './schema.ts';
 
+const { Pool } = pg;
+
 declare global {
-  var _postgresPool: Pool | undefined;
+  var _postgresPool: PoolType | undefined;
   var _schemaInitialized: boolean | undefined;
 }
 
@@ -36,7 +39,7 @@ export function hasDatabaseConfig(): boolean {
   return Boolean(connUrl || sqlHost);
 }
 
-export const createPool = () => {
+export const createPool = (): PoolType => {
   if (!global._postgresPool) {
     const connectionString = (
       process.env.DATABASE_URL ||
