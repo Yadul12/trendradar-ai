@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
-import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
+import { requireAuth, type AuthRequest } from './src/middleware/auth.ts';
 import { hasDatabaseConfig, pool, ensureDatabaseSchema } from './src/db/index.ts';
 import {
   getOrCreateUser,
