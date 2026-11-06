@@ -1,6 +1,28 @@
 import { initializeApp, getApps, cert, type AppOptions } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { getAuth, type Auth } from 'firebase-admin/auth';
+import fs from 'fs';
+import path from 'path';
+
+function resolveDefaultProjectId(): string {
+  if (process.env.FIREBASE_PROJECT_ID?.trim()) {
+    return process.env.FIREBASE_PROJECT_ID.trim();
+  }
+  if (process.env.VITE_FIREBASE_PROJECT_ID?.trim()) {
+    return process.env.VITE_FIREBASE_PROJECT_ID.trim();
+  }
+  try {
+    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (parsed.projectId) {
+        return parsed.projectId;
+      }
+    }
+  } catch {
+    // ignore read errors in serverless environments
+  }
+  return 'stunning-casing-qpz3c';
+}
 
 function parseServiceAccount(raw: string) {
   const trimmed = raw.trim();
@@ -15,8 +37,7 @@ function parseServiceAccount(raw: string) {
 }
 
 function buildAdminOptions(): AppOptions {
-  const projectId =
-    process.env.FIREBASE_PROJECT_ID?.trim() || firebaseConfig.projectId;
+  const projectId = resolveDefaultProjectId();
 
   const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
   if (serviceAccountRaw && serviceAccountRaw.trim()) {
@@ -39,8 +60,9 @@ function buildAdminOptions(): AppOptions {
   return { projectId };
 }
 
-if (!getApps().length) {
-  initializeApp(buildAdminOptions());
+export function getAdminAuth(): Auth {
+  if (!getApps().length) {
+    initializeApp(buildAdminOptions());
+  }
+  return getAuth();
 }
-
-export const adminAuth = getAuth();
