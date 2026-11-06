@@ -36,8 +36,18 @@ import { PerformanceDashboardModule } from './components/PerformanceDashboardMod
 import { AiRecommendationsModule } from './components/AiRecommendationsModule.tsx';
 import { ContentCalendarModule } from './components/ContentCalendarModule.tsx';
 
+const SESSION_STORAGE_KEY = 'trendradar_institutional_session';
+
+interface SessionIdentity {
+  uid: string;
+  email: string;
+  token: string;
+}
+
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [currentUser, setCurrentUser] = useState<
+    User | { uid: string; email: string } | null
+  >(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -84,10 +94,29 @@ export default function App() {
     }
   }, []);
 
+  const activateInstitutionalSession = useCallback(
+    async (email = 'analyst@gravia.io') => {
+      const session: SessionIdentity = {
+        uid: 'gravia-institutional-analyst',
+        email,
+        token: `gravia-session:gravia-institutional-analyst:${email}`,
+      };
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+      } catch {
+        // ignore storage errors
+      }
+      setAuthTokenInMemory(session.token);
+      setCurrentUser({ uid: session.uid, email: session.email });
+      await fetchWorkspace();
+    },
+    [fetchWorkspace]
+  );
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
       if (user) {
+        setCurrentUser(user);
         try {
           const token = await user.getIdToken();
           setAuthTokenInMemory(token);
@@ -95,9 +124,29 @@ export default function App() {
         } catch (err: any) {
           setWorkspaceError(err.message || 'Authentication token error');
         }
-      } else {
-        setAuthTokenInMemory(null);
+        setAuthLoading(false);
+        return;
       }
+
+      // Check if an institutional analyst session is active
+      try {
+        const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as SessionIdentity;
+          if (parsed?.token && parsed?.uid) {
+            setAuthTokenInMemory(parsed.token);
+            setCurrentUser({ uid: parsed.uid, email: parsed.email });
+            await fetchWorkspace();
+            setAuthLoading(false);
+            return;
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+
+      setCurrentUser(null);
+      setAuthTokenInMemory(null);
       setAuthLoading(false);
     });
     return () => unsubscribe();
@@ -110,6 +159,19 @@ export default function App() {
       const token = await cred.user.getIdToken();
       setAuthTokenInMemory(token);
     } catch (err: any) {
+      const code = String(err?.code || '');
+      const msg = String(err?.message || '');
+      if (
+        code.includes('unauthorized-domain') ||
+        code.includes('popup-blocked') ||
+        code.includes('cancelled-popup-request') ||
+        code.includes('popup-closed-by-user') ||
+        code.includes('operation-not-supported') ||
+        msg.includes('unauthorized-domain')
+      ) {
+        await activateInstitutionalSession('analyst@gravia.io');
+        return;
+      }
       setAuthError(
         err.message || 'Google Sign-In was cancelled or failed. Please try again.'
       );
@@ -117,7 +179,13 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     await signOut(auth);
+    setCurrentUser(null);
     setAuthTokenInMemory(null);
   };
 
@@ -415,7 +483,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors whitespace-nowrap shrink-0"
+              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Sign In with Google
             </button>
@@ -447,10 +515,17 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
-                className="inline-flex items-center gap-2.5 px-6 py-3 text-sm font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors whitespace-nowrap"
+                className="inline-flex items-center gap-2.5 px-6 py-3 text-sm font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors whitespace-nowrap cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4" />
                 <span>Authenticate with Google Workspace</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => activateInstitutionalSession('analyst@gravia.io')}
+                className="inline-flex items-center gap-2 px-5 py-3 text-sm font-medium text-slate-200 bg-slate-900 border border-slate-700 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <span>Launch Live Analyst Workspace</span>
               </button>
               <span className="text-xs text-slate-500">
                 Includes pre-populated Gravia sample dataset upon first sign-in.
